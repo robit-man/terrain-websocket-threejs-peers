@@ -1,0 +1,1437 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>XR + Desktop + Mobile Nav Demo</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: #111a;
+            color: #eeea;
+            font-family: monospace;
+        }
+
+        #hint {
+            border-radius: 2rem;
+            position: fixed;
+            top: 1rem;
+            left: 1rem;
+            font-size: .75rem;
+            background: rgba(0, 0, 0, 0.5);
+            padding: .5em 1em;
+            pointer-events: none;
+        }
+
+        #curHash {
+            position: fixed;
+            bottom: 1rem;
+            right: 1rem;
+            border-radius: 2rem;
+
+            font-size: .75rem;
+            background: rgba(0, 0, 0, 0.5);
+            padding: .5em 1em;
+            pointer-events: none;
+        }
+
+        #request,
+        #geo {
+            /* <── changed line */
+            background: black;
+            cursor: pointer;
+            border: none;
+            position: fixed;
+            top: 1rem;
+            border-radius: 2rem;
+            width: 4rem;
+            height: 4rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+            padding: 0.5rem;
+        }
+
+        /* small offset so buttons sit side-by-side (geo = left of request) */
+        #geo {
+            right: 1rem;
+        }
+
+        /* 4 rem width + 1.5 rem gap */
+        #request {
+            right: 5.5rem;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="hint">Click to lock • Arrows/WASD/Shift/run • Space/jump • Ctrl/crouch • Touch drag/look</div>
+    <button id="request">
+        <svg xmlns="http://www.w3.org/2000/svg" width="2rem" height="2rem" viewBox="0 0 24 24" fill="none">
+            <path
+                d="M12 18H12.01M9.2 21H14.8C15.9201 21 16.4802 21 16.908 20.782C17.2843 20.5903 17.5903 20.2843 17.782 19.908C18 19.4802 18 18.9201 18 17.8V6.2C18 5.0799 18 4.51984 17.782 4.09202C17.5903 3.71569 17.2843 3.40973 16.908 3.21799C16.4802 3 15.9201 3 14.8 3H9.2C8.0799 3 7.51984 3 7.09202 3.21799C6.71569 3.40973 6.40973 3.71569 6.21799 4.09202C6 4.51984 6 5.07989 6 6.2V17.8C6 18.9201 6 19.4802 6.21799 19.908C6.40973 20.2843 6.71569 20.5903 7.09202 20.782C7.51984 21 8.07989 21 9.2 21Z"
+                stroke="#eeeeeeaa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+    </button>
+    <button id="geo">
+        <!-- simple location-pin icon -->
+        <svg xmlns="http://www.w3.org/2000/svg" width="2rem" height="2rem" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2C8.686 2 6 4.686 6 8c0 5.25 6 12 6 12s6-6.75 6-12c0-3.314-2.686-6-6-6Z" stroke="#eeeeeeaa"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            <circle cx="12" cy="8" r="2.5" fill="#eeeeeeaa" />
+        </svg>
+    </button>
+    <div id="curHash">
+        --
+    </div>
+    <div id="peerList" style="
+    position: fixed;
+    bottom: 1rem;
+    left: 1rem;
+    max-height: 30%;
+    overflow-y: auto;
+    background: rgba(0,0,0,0.5);
+    padding: .5em 1em;
+    border-radius: 1em;
+    font-size: .75rem;
+">
+        <strong>Peers:</strong>
+        <ul id="peerListUL" style="margin: .5em 0 0 0; padding: 0; list-style: none;"></ul>
+    </div>
+
+
+    <script type="importmap">
+{
+  "imports": {
+    "three"                  : "https://cdn.jsdelivr.net/npm/three@0.177.0/build/three.module.min.js",
+    "VRButton"               : "https://cdn.jsdelivr.net/npm/three@0.177.0/examples/jsm/webxr/VRButton.js",
+    "XRControllerModelFactory": "https://cdn.jsdelivr.net/npm/three@0.177.0/examples/jsm/webxr/XRControllerModelFactory.js",
+    "PointerLockControls"    : "https://cdn.jsdelivr.net/npm/three@0.177.0/examples/jsm/controls/PointerLockControls.js",
+    "lz-string"              : "https://cdn.jsdelivr.net/npm/lz-string@1.4.4/+esm",
+    "socket.io"              : "https://cdn.jsdelivr.net/npm/socket.io-client@4.5.4/dist/socket.io.esm.min.js"
+  }
+}
+</script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'VRButton';
+        import { XRControllerModelFactory } from 'XRControllerModelFactory';
+        import { PointerLockControls } from 'PointerLockControls';
+        import LZString from 'lz-string';
+        import { io } from 'socket.io';
+
+
+        const SIGNALING_SERVER = 'https://ipfs-signaling-vr.loca.lt';
+
+        const c16 = LZString.compressToUTF16;
+        const d16 = LZString.decompressFromUTF16;
+
+        const DIRS = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
+        const BUCKET_SIZE = 50;                // color‐bucket height in meters
+        const TILE_CACHE_SAVE_INTERVAL = 100;  // ms between localStorage commits
+
+        const Geohash = (() => {
+            const BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz";
+
+            /**
+             * Encode latitude and longitude into a geohash string.
+             * @param {number} latitude  - latitude in degrees
+             * @param {number} longitude - longitude in degrees
+             * @param {number} [precision=7] - number of characters in resulting geohash
+             * @returns {string} the geohash
+             */
+            function encode(latitude, longitude, precision = 7) {
+                let isEven = true;
+                let bit = 0;
+                let ch = 0;
+                let geohash = "";
+
+                let latMin = -90.0, latMax = 90.0;
+                let lonMin = -180.0, lonMax = 180.0;
+
+                while (geohash.length < precision) {
+                    if (isEven) {
+                        // refine longitude interval
+                        const mid = (lonMin + lonMax) / 2;
+                        if (longitude >= mid) {
+                            ch |= 1 << (4 - bit);
+                            lonMin = mid;
+                        } else {
+                            lonMax = mid;
+                        }
+                    } else {
+                        // refine latitude interval
+                        const mid = (latMin + latMax) / 2;
+                        if (latitude >= mid) {
+                            ch |= 1 << (4 - bit);
+                            latMin = mid;
+                        } else {
+                            latMax = mid;
+                        }
+                    }
+
+                    isEven = !isEven;
+
+                    if (bit < 4) {
+                        bit++;
+                    } else {
+                        // 5 bits accumulated, map to base32 char
+                        geohash += BASE32[ch];
+                        bit = 0;
+                        ch = 0;
+                    }
+                }
+
+                return geohash;
+            }
+
+            return { encode };
+        })();
+        // --- Utilities for hex grid & elevation caching ---
+        class Utils {
+            static smoothstep(t) {
+                return t * t * (3 - 2 * t);
+            }
+            static compress(json) {
+                return LZString.compressToUTF16(json);
+            }
+            static decompress(comp) {
+                return LZString.decompressFromUTF16(comp);
+            }
+        }
+
+        // ─── PeerManager: handles socket connection, broadcasting, and remote peers ─────────────────
+        class PeerManager {
+            constructor(serverUrl, scene, dolly, camera, hexGridMgr) {
+                this.scene = scene;
+                this.dolly = dolly;
+                this.camera = camera;
+                this.hexGrid = hexGridMgr;
+                this.socket = io(serverUrl, { transports: ['websocket'] });
+
+                // **NEW** handle our peer‐list UI
+                this.peerListEl = document.getElementById('peerListUL');
+                // map of peerId → { group, arrow, targetPos, targetDir, currentDir }
+                this.peers = {};
+
+                // socket handlers
+                this.socket.on('connect', () => this.broadcastPose());
+                this.socket.on('existing-peers', peers => peers.forEach(p => this._addPeer(p.id)));
+                this.socket.on('new-peer', peer => this._addPeer(peer.id));
+                this.socket.on('peer-disconnect', id => this._removePeer(id));
+                this.socket.on('peer-message', data => {
+                    const pb = this.peers[data.peerId];
+                    if (!pb) return;
+                    const m = JSON.parse(data.message);
+                    pb.targetPos.set(m.x, m.y + this.hexGrid.tileRadius, m.z);
+                    pb.targetDir.set(m.dx, m.dy, m.dz);
+                });
+            }
+
+            broadcastPose() {
+                if (!this.socket.connected) return;
+                const p = this.dolly.position.clone();
+                const d = new THREE.Vector3();
+                this.camera.getWorldDirection(d);
+                this.socket.emit('broadcast-message', {
+                    message: JSON.stringify({
+                        x: p.x, y: p.y - this.hexGrid.tileRadius, z: p.z,
+                        dx: d.x, dy: d.y, dz: d.z
+                    })
+                });
+            }
+
+            _addPeer(id) {
+                if (this.peers[id]) return;
+                const color = Math.random() * 0xffffff;
+                const sph = new THREE.Mesh(
+                    new THREE.SphereGeometry(0.1, 12, 8),
+                    new THREE.MeshStandardMaterial({ color })
+                );
+                const arr = new THREE.ArrowHelper(
+                    new THREE.Vector3(0, 0, 1),
+                    new THREE.Vector3(),
+                    0.2, color
+                );
+                const grp = new THREE.Group();
+                grp.add(sph, arr);
+                this.scene.add(grp);
+                this.peers[id] = {
+                    group: grp,
+                    arrow: arr,
+                    targetPos: new THREE.Vector3(),
+                    targetDir: new THREE.Vector3(),
+                    currentDir: new THREE.Vector3(0, 0, 1)
+                };
+                // **NEW** add to the DOM list
+                const li = document.createElement('li');
+                li.id = `peer-${id}`;
+                li.textContent = id;
+                li.style.padding = '0.2em 0';
+                this.peerListEl.appendChild(li);
+                this.peers[id].listItem = li;
+            }
+
+            _removePeer(id) {
+                const pb = this.peers[id];
+                if (!pb) return;
+                this.scene.remove(pb.group);
+                delete this.peers[id];
+            }
+
+            updatePeers() {
+                Object.values(this.peers).forEach(pb => {
+                    // smooth position
+                    pb.group.position.lerp(pb.targetPos, 0.1);
+                    // stick to terrain
+                    const h = this.hexGrid.getHeightAt(pb.group.position.x, pb.group.position.z);
+                    pb.group.position.y = h + 3.2;
+
+                    // smooth direction
+                    const desired = pb.targetDir.clone().normalize();
+                    pb.currentDir.lerp(desired, 0.1);
+                    pb.arrow.setDirection(pb.currentDir);
+                });
+            }
+        }
+
+        class UniformHexGrid {
+            constructor(spacing = 1, size = 100) {
+                this.spacing = spacing;
+                this.radius = size / 2;
+                this._rings(); this._geom(); this._mesh();
+            }
+            _rings() {
+                const s = this.spacing, h = Math.sqrt(3) / 2 * s,
+                    N = Math.floor(this.radius / s);
+                this.pos = []; this.tri = [];
+                const map = {}, verts = []; let idx = 0;
+                for (let j = -N; j <= N; j++) {
+                    for (let i = -N; i <= N; i++) {
+                        if (Math.max(Math.abs(i), Math.abs(j), Math.abs(i + j)) > N) continue;
+                        const x = (i + j / 2) * s, z = j * h;
+                        map[`${i},${j}`] = idx++; verts.push(x, 0, z);
+                    }
+                }
+                this.pos = verts;
+                for (let j = -N; j < N; j++) {
+                    for (let i = -N; i < N; i++) {
+                        const a = map[`${i},${j}`], b = map[`${i + 1},${j}`],
+                            c = map[`${i},${j + 1}`], d = map[`${i + 1},${j + 1}`];
+                        if (a != null && b != null && c != null) this.tri.push(a, b, c);
+                        if (b != null && d != null && c != null) this.tri.push(b, d, c);
+                    }
+                }
+            }
+            _geom() {
+                const posAttr = new THREE.Float32BufferAttribute(
+                    new Float32Array(this.pos), 3
+                ).setUsage(THREE.DynamicDrawUsage);
+                const vCount = this.pos.length / 3;
+                const cols = new Float32Array(vCount * 3);
+                for (let i = 0; i < vCount; i++) {
+                    cols[3 * i] = 0.2; cols[3 * i + 1] = 0.4; cols[3 * i + 2] = 0.8;
+                }
+                const colAttr = new THREE.Float32BufferAttribute(cols, 3)
+                    .setUsage(THREE.DynamicDrawUsage);
+                this.geometry = new THREE.BufferGeometry();
+                this.geometry.setAttribute('position', posAttr);
+                this.geometry.setAttribute('color', colAttr);
+                this.geometry.setIndex(this.tri);
+                this.geometry.computeVertexNormals();
+                this.geometry.computeBoundingSphere();
+            }
+            _mesh() {
+                const mat = new THREE.MeshStandardMaterial({
+                    vertexColors: true, side: THREE.DoubleSide
+                });
+                const wire = new THREE.MeshBasicMaterial({
+                    color: 0x000, transparent: true, opacity: 0.1, wireframe: true
+                });
+                this.mesh = new THREE.Mesh(this.geometry, mat);
+                this.mesh.frustumCulled = false;
+                const wMesh = new THREE.Mesh(this.geometry, wire);
+                wMesh.frustumCulled = false; wMesh.renderOrder = 1;
+                this.group = new THREE.Group();
+                this.group.add(this.mesh, wMesh);
+            }
+            get object() { return this.group; }
+        }
+
+
+        class TileManager {
+            constructor(scene, spacing = 5, tileRadius = 50) {
+                this.scene = scene;
+                this.spacing = spacing;
+                this.tileRadius = tileRadius;
+                this.tiles = new Map();    // id → { grid, q, r, elevArr, fetched, populating }
+                this.origin = null;         // set on first gps‐updated
+                this.elevCache = this._loadCache();
+
+                this.ray = new THREE.Raycaster();
+                this.DOWN = new THREE.Vector3(0, -1, 0);
+
+                // basic lighting
+                if (!scene.userData._tmLightsAdded) {
+                    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+                    const dl = new THREE.DirectionalLight(0xffffff, 0.6);
+                    dl.position.set(50, 100, 50);
+                    dl.castShadow = true;
+                    scene.add(dl);
+                    scene.userData._tmLightsAdded = true;
+                }
+
+                // shared material
+                if (!TileManager.sharedMat) {
+                    TileManager.sharedMat = new THREE.MeshStandardMaterial({
+                        vertexColors: true,
+                        flatShading: false,
+                        metalness: 0.2,
+                        roughness: 0.8,
+                        side: THREE.DoubleSide
+                    });
+                }
+
+                // wait for GPS fix
+                document.addEventListener('gps-updated', e => {
+                    if (!this.origin) {
+                        this.origin = e.detail;
+                        this.addTile(0, 0);
+                    }
+                }, { once: true });
+
+                if (!TileManager._tmpV) TileManager._tmpV = new THREE.Vector3();
+                this._lastHeight = 0;
+            }
+
+            static minY = Infinity;
+            static maxY = -Infinity;
+            static _globalRecolorPending = false;
+
+            // schedule a full‐scene recolor next frame
+            _scheduleGlobalRecolor() {
+                if (TileManager._globalRecolorPending) return;
+                TileManager._globalRecolorPending = true;
+                requestAnimationFrame(() => {
+                    for (const { grid } of this.tiles.values()) {
+                        this._recolorTile(grid);
+                    }
+                    TileManager._globalRecolorPending = false;
+                });
+            }
+
+            // public: sample terrain height
+            getHeightAt(x, z) {
+                // reuse tmp vector
+                TileManager._tmpV.set(x, 100, z);
+                this.ray.set(TileManager._tmpV, this.DOWN);
+
+                // cache meshes list if you want to micro-optimize this
+                const meshes = Array.from(this.tiles.values()).map(d => d.grid.mesh);
+                const hit = this.ray.intersectObjects(meshes, true);
+
+                if (hit.length) {
+                    // store and return the real surface
+                    this._lastHeight = hit[0].point.y;
+                    return this._lastHeight;
+                } else {
+                    // if no hit, stay locked to last height
+                    return this._lastHeight;
+                }
+            }
+
+            // called each frame with player position
+            update(playerPos) {
+                if (!this.origin) return;
+                const a = this.tileRadius;
+                const qf = (2 / 3 * playerPos.x) / a;
+                const rf = ((-1 / 3 * playerPos.x) + (Math.sqrt(3) / 3 * playerPos.z)) / a;
+                const q0 = Math.round(qf), r0 = Math.round(rf);
+                const dq = qf - q0, dr = rf - r0, ds = -dq - dr;
+                const dist = Math.max(Math.abs(dq), Math.abs(dr), Math.abs(ds)) * a;
+                if (dist < 15) return;
+
+                // choose 1–2 directions to expand
+                const dots = DIRS
+                    .map(([dx, dy]) => ({ dir: [dx, dy], dot: dq * dx + dr * dy }))
+                    .sort((a, b) => b.dot - a.dot);
+
+                const toAdd = [dots[0].dir];
+                if (dots[1].dot > 0.5 * dots[0].dot) toAdd.push(dots[1].dir);
+
+                for (const [dx, dy] of toAdd) {
+                    const nq = q0 + dx, nr = r0 + dy;
+                    this._ensureTile(nq, nr);
+                    DIRS.forEach(([dx2, dy2]) => this._ensureTile(nq + dx2, nr + dy2));
+                }
+            }
+
+            // ensure tile exists, bump LRU, recolor on recall
+            _ensureTile(q, r) {
+                const id = `${q},${r}`;
+                if (this.tiles.has(id)) {
+                    // bump to most‐recent
+                    const entry = this.tiles.get(id);
+                    this.tiles.delete(id);
+                    this.tiles.set(id, entry);
+                    // immediately recolor recalled tile (and neighbors)
+                    this._scheduleGlobalRecolor();
+                } else {
+                    this.addTile(q, r);
+                }
+                // prune oldest if over 100
+                while (this.tiles.size > 800) {
+                    const oldest = this.tiles.keys().next().value;
+                    this._disposeTile(oldest);
+                }
+            }
+
+            // create a new hex tile at grid coords (q,r)
+            addTile(q, r) {
+                const id = `${q},${r}`;
+                const grid = new UniformHexGrid(this.spacing, this.tileRadius * 2);
+                grid.id = id;
+                grid.group.name = `tile-${id}`;
+
+                // position in world
+                const a = this.tileRadius;
+                grid.group.position.set(
+                    1.5 * a * q,
+                    0,
+                    a * (Math.sqrt(3) / 2 * q + Math.sqrt(3) * r)
+                );
+
+                // ensure vertex‐color attribute
+                const geom = grid.geometry;
+                if (!geom.attributes.color) {
+                    const arr = new Float32Array(geom.attributes.position.count * 3);
+                    geom.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+                }
+
+                // apply shared material
+                grid.mesh.material = TileManager.sharedMat;
+
+                // seed height from neighbors
+                let sum = 0, cnt = 0;
+                for (const [dx, dy] of DIRS) {
+                    const n = this.tiles.get(`${q + dx},${r + dy}`);
+                    if (n && Number.isFinite(n.grid.avgHeight)) {
+                        sum += n.grid.avgHeight; cnt++;
+                    }
+                }
+                const seedH = cnt ? sum / cnt : 0;
+
+                // initialize vertex heights
+                const pos = geom.attributes.position;
+                for (let i = 0; i < pos.count; i++) pos.setY(i, seedH);
+                pos.needsUpdate = true;
+
+                // per‐tile state
+                const elevArr = Array(pos.count).fill(null);
+                const fetched = new Set();
+                this.tiles.set(id, { grid, q, r, elevArr, fetched, populating: false });
+                this.scene.add(grid.group);
+
+                // kick off async elevation fetch
+                setTimeout(() => this._populate(id), 0);
+            }
+
+            // fetch elevations for any missing verts
+            _populate(id) {
+                const data = this.tiles.get(id);
+                if (!data || !this.origin || data.populating) return;
+                data.populating = true;
+
+                const { grid, elevArr, fetched } = data;
+                const pos = grid.geometry.attributes.position;
+                const n = pos.count;
+
+                // helper: smooth‐fill missing verts from fetched average
+                const smoothFill = () => {
+                    if (!fetched.size) return;
+                    let s = 0; fetched.forEach(i => s += pos.getY(i));
+                    const avg = s / fetched.size;
+                    for (let j = 0; j < n; j++) {
+                        if (!fetched.has(j)) pos.setY(j, avg);
+                    }
+                    pos.needsUpdate = true;
+                };
+
+                // reload local cache
+                const raw = localStorage.getItem(`tile:${id}`);
+                if (raw) {
+                    try {
+                        const obj = JSON.parse(raw);
+                        obj.fetched.forEach(i => {
+                            elevArr[i] = obj.elevArr[i];
+                            pos.setY(i, obj.elevArr[i]);
+                            fetched.add(i);
+                        });
+                        pos.needsUpdate = true;
+                        smoothFill();
+                    } catch {
+                        localStorage.removeItem(`tile:${id}`);
+                    }
+                }
+
+                // queue missing indices
+                const queue = [];
+                for (let i = 0; i < n; i++) if (!fetched.has(i)) queue.push(i);
+                if (!queue.length) {
+                    data.populating = false;
+                    return this._finalizeTile(id);
+                }
+
+                // fill edges last
+                queue.sort((a, b) => {
+                    const ax = pos.getX(a), az = pos.getZ(a);
+                    const bx = pos.getX(b), bz = pos.getZ(b);
+                    return (bx * bx + bz * bz) - (ax * ax + az * az);
+                });
+
+                const mLat = 111320;
+                const mLon = 111320 * Math.cos(this.origin.lat * Math.PI / 180);
+                const MAX_CON = 60;
+                let active = 0;
+
+                const apply = (i, val) => {
+                    pos.setY(i, val);
+                    elevArr[i] = val;
+                    fetched.add(i);
+                    // expand global min/max only
+                    TileManager.minY = Math.min(TileManager.minY, val);
+                    TileManager.maxY = Math.max(TileManager.maxY, val);
+                    smoothFill();
+                    this._scheduleGlobalRecolor();
+                    active--; dequeue();
+                    if (active === 0 && fetched.size === n) {
+                        data.populating = false;
+                        this._finalizeTile(id);
+                    }
+                };
+
+                const dequeue = () => {
+                    while (active < MAX_CON && queue.length) {
+                        const i = queue.shift(); active++;
+                        const wx = grid.group.position.x + pos.getX(i);
+                        const wz = grid.group.position.z + pos.getZ(i);
+                        const lat = this.origin.lat + wz / mLat;
+                        const lon = this.origin.lon + wx / mLon;
+                        const c = this._elevCache(lat, lon);
+                        if (c != null) apply(i, c);
+                        else fetch(
+                            `https://epqs.nationalmap.gov/v1/json?x=${lon}&y=${lat}&wkid=4326&units=Meters`
+                        )
+                            .then(r => r.json())
+                            .then(d => apply(i, d.value || 0))
+                            .catch(() => apply(i, 0));
+                    }
+                };
+
+                dequeue();
+            }
+
+            // finalize: bake normals, average height, stitch and cache
+            _finalizeTile(id) {
+                const data = this.tiles.get(id);
+                if (!data) return;
+                const { grid, elevArr, fetched } = data;
+                grid.geometry.computeVertexNormals();
+                grid.geometry.attributes.position.setUsage(THREE.StaticDrawUsage);
+                grid.avgHeight = elevArr.reduce((s, v) => s + v, 0) / fetched.size;
+
+                // stitch edges: existing neighbor heights override this tile
+                this._stitchEdges(id);
+
+                // persist
+                localStorage.setItem(
+                    `tile:${id}`,
+                    JSON.stringify({ elevArr, fetched: Array.from(fetched) })
+                );
+            }
+
+            // align shared vertices: neighbor B yields to A on recall
+            _stitchEdges(id) {
+                const dataA = this.tiles.get(id);
+                const { grid: gridA, fetched: fetchedA } = dataA;
+                const posA = gridA.geometry.attributes.position;
+                const nA = posA.count;
+                const mapA = new Map();
+
+                // world → index for A
+                for (let i = 0; i < nA; i++) {
+                    const wx = gridA.group.position.x + posA.getX(i);
+                    const wz = gridA.group.position.z + posA.getZ(i);
+                    mapA.set(`${wx.toFixed(3)},${wz.toFixed(3)}`, i);
+                }
+
+                for (const [dx, dy] of DIRS) {
+                    const nid = `${dataA.q + dx},${dataA.r + dy}`;
+                    const dataB = this.tiles.get(nid);
+                    if (!dataB) continue;
+                    const { grid: gridB } = dataB;
+                    const posB = gridB.geometry.attributes.position;
+                    const nB = posB.count;
+
+                    // world → index for B
+                    const mapB = new Map();
+                    for (let j = 0; j < nB; j++) {
+                        const wx = gridB.group.position.x + posB.getX(j);
+                        const wz = gridB.group.position.z + posB.getZ(j);
+                        mapB.set(`${wx.toFixed(3)},${wz.toFixed(3)}`, j);
+                    }
+
+                    // B adopts A's heights where A has real data
+                    for (const [key, i] of mapA.entries()) {
+                        if (!fetchedA.has(i)) continue;
+                        const j = mapB.get(key);
+                        if (j !== undefined) {
+                            posB.setY(j, posA.getY(i));
+                        }
+                    }
+                    posB.needsUpdate = true;
+                    gridB.geometry.computeVertexNormals();
+                }
+
+                posA.needsUpdate = true;
+                gridA.geometry.computeVertexNormals();
+            }
+
+            _recolorTile(grid) {
+                const pos = grid.geometry.attributes.position;
+                const col = grid.geometry.attributes.color;
+                const n = pos.count;
+                const minY = TileManager.minY, maxY = TileManager.maxY;
+                const span = Math.max(1e-6, maxY - minY);
+                for (let i = 0; i < n; i++) {
+                    const y = pos.getY(i);
+                    const t = THREE.MathUtils.clamp((y - minY) / span, 0, 1);
+                    col.setXYZ(i, t, 0.4 + 0.6 * t, 0.8 * (1 - t));
+                }
+                col.needsUpdate = true;
+            }
+
+            _disposeTile(id) {
+                const { grid } = this.tiles.get(id);
+                this.scene.remove(grid.group);
+                grid.geometry.dispose();
+                grid.mesh?.material.dispose();
+                this.tiles.delete(id);
+            }
+
+            _loadCache() {
+                try { return JSON.parse(localStorage.getItem('elevCacheV1')) || {}; }
+                catch { return {}; }
+            }
+
+            _elevCache(lat, lon) {
+                const k = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+                return this.elevCache[k] ?? null;
+            }
+
+            _storeCache(lat, lon, v) {
+                const k = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+                this.elevCache[k] = v;
+                localStorage.setItem('elevCacheV1', JSON.stringify(this.elevCache));
+            }
+            getCurrentHash(playerPos, precision = 7) {
+                if (!this.origin) return '';
+                const a = this.tileRadius;
+                // convert world x,z → fractional axial coords:
+                const qf = (2 / 3 * playerPos.x) / a;
+                const rf = ((-1 / 3 * playerPos.x) + (Math.sqrt(3) / 3 * playerPos.z)) / a;
+                // round to nearest hex indices:
+                const q0 = Math.round(qf), r0 = Math.round(rf);
+
+                // compute that hex's center in world coords:
+                const cx = 1.5 * a * q0;
+                const cz = a * (Math.sqrt(3) / 2 * q0 + Math.sqrt(3) * r0);
+
+                // convert back to lat/lon
+                const mLat = 111320;
+                const mLon = 111320 * Math.cos(this.origin.lat * Math.PI / 180);
+                const lat = this.origin.lat + cz / mLat;
+                const lon = this.origin.lon + cx / mLon;
+
+                return Geohash.encode(lat, lon, precision);
+            }
+
+        }
+
+        // --- Rest of app classes (Platform, SensorManager, SceneManager, etc.) ---
+        class Platform {
+            constructor() {
+                this.isMobile = /Mobi|Android/i.test(navigator.userAgent);
+            }
+        }
+        class GeoRequester {
+            constructor(btn) {
+                this.btn = btn;
+                if (!('geolocation' in navigator)) {
+                    btn.style.display = 'none';
+                    console.warn('[GeoRequester] Geolocation API unavailable');
+                    return;
+                }
+                btn.addEventListener('click', () => this._request(), { once: true });
+            }
+
+            _request() {
+                const success = pos => {
+                    const { latitude: lat, longitude: lon } = pos.coords;
+                    document.dispatchEvent(new CustomEvent('gps-updated', { detail: { lat, lon } }));
+                    navigator.geolocation.watchPosition(
+                        p => {
+                            const { latitude, longitude } = p.coords;
+                            document.dispatchEvent(new CustomEvent('gps-updated', { detail: { lat: latitude, lon: longitude } }));
+                        },
+                        err => console.warn('[GeoRequester] watchPosition error', err),
+                        { enableHighAccuracy: true, maximumAge: 5000, distanceFilter: 1 }
+                    );
+                    this.btn.disabled = true;
+                };
+                const fail = err => {
+                    console.warn('[GeoRequester] getCurrentPosition failed', err);
+                    /* allow retry */
+                    this.btn.disabled = false;
+                    this.btn.addEventListener('click', () => this._request(), { once: true });
+                };
+                this.btn.disabled = true;            // immediate visual feedback
+                navigator.geolocation.getCurrentPosition(success, fail, { enableHighAccuracy: true });
+            }
+        }
+        // REPLACE WITH ─ UnifiedSensorManager (VR-ready geo prompt + live orientation) ─
+        class SensorManager {
+            constructor(requestBtn, hintEl, platform) {
+                this.requestBtn = requestBtn;
+                this.hintEl = hintEl;
+                this.platform = platform;
+
+                /* show button only if any permission still needs a user gesture */
+                this.needsGesture =
+                    typeof DeviceOrientationEvent?.requestPermission === 'function' ||
+                    typeof DeviceMotionEvent?.requestPermission === 'function';
+
+                if (!this.needsGesture) {
+                    /* desktop or already-granted → start immediately */
+                    this.requestBtn.style.display = 'none';
+                    this._enableAllSensors();
+                } else {
+                    /* mobile / VR browsers: wait for single tap */
+                    this.requestBtn.addEventListener('click', () => this._enableAllSensors(), { once: true });
+                }
+
+                this.hintEl.textContent = 'Awaiting Sensor Permission • ' + this.hintEl.textContent;
+            }
+
+            /* ------------------------------------------------------------------ */
+            async _enableAllSensors() {
+                /* 1️⃣  Orientation / motion */
+                try {
+                    if (typeof DeviceOrientationEvent?.requestPermission === 'function') {
+                        const st = await DeviceOrientationEvent.requestPermission();
+                        if (st !== 'granted') throw 'orientation denied';
+                    }
+                    if (typeof DeviceMotionEvent?.requestPermission === 'function') {
+                        const st = await DeviceMotionEvent.requestPermission();
+                        if (st !== 'granted') throw 'motion denied';
+                    }
+                    window.addEventListener('deviceorientation', e => this._broadcastOrient(e), true);
+                    window.addEventListener('devicemotion', () => { }, true); // (future use)
+                } catch { console.warn('[SensorMgr] orientation/motion permission denied'); }
+
+                /* 2️⃣  Geolocation – works on desktop, mobile, and VR browsers           */
+                if (!('geolocation' in navigator)) {
+                    console.warn('[SensorMgr] Geolocation API unavailable');
+                } else {
+                    /* query permission state so we know whether a prompt will appear      */
+                    const perm = await (navigator.permissions?.query?.({ name: 'geolocation' }) ?? Promise.resolve({ state: 'prompt' }));
+                    /* request once so the browser can prompt (VR headsets often need it) */
+                    if (perm.state !== 'granted') {
+                        try { await this._oneShotGeo(); } catch { /* prompt dismissed */ }
+                    }
+                    /* keep position flowing thereafter                                    */
+                    navigator.geolocation.watchPosition(
+                        p => this._broadcastGPS(p),
+                        err => console.warn('[SensorMgr] watchPosition error', err),
+                        { enableHighAccuracy: true, maximumAge: 5000, distanceFilter: 1 }
+                    );
+                }
+
+                /* UI feedback */
+                this.requestBtn.disabled = true;
+                this.hintEl.textContent = 'Sensors Enabled • ' + this.hintEl.textContent;
+            }
+
+            /* helper – single getCurrentPosition to trigger browser prompt         */
+            _oneShotGeo() {
+                return new Promise((res, rej) => {
+                    navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy: true });
+                }).then(p => this._broadcastGPS(p));
+            }
+
+            _broadcastGPS(pos) {
+                const { latitude: lat, longitude: lon } = pos.coords;
+                document.dispatchEvent(new CustomEvent('gps-updated', { detail: { lat, lon } }));
+            }
+
+            _broadcastOrient(ev) {
+                if (ev.alpha == null && ev.beta == null && ev.gamma == null) return;
+                document.dispatchEvent(new CustomEvent('orientation-updated', {
+                    detail: { alpha: ev.alpha ?? 0, beta: ev.beta ?? 0, gamma: ev.gamma ?? 0 }
+                }));
+            }
+        }
+
+
+
+        class SceneManager {
+            constructor(platform) {
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.renderer.setPixelRatio(window.devicePixelRatio);
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.xr.enabled = true;
+                document.body.appendChild(this.renderer.domElement);
+                document.body.appendChild(VRButton.createButton(this.renderer));
+                this.renderer.xr.addEventListener('sessionstart', () => document.getElementById('request').style.display = 'none');
+
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x202020);
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 1000);
+                this.camera.position.set(0, 1.6, 0);
+                this.dolly = new THREE.Group(); this.dolly.add(this.camera); this.scene.add(this.dolly);
+                this.scene.add(new THREE.HemisphereLight(0xffffbb, 0x080820, 0.8));
+                // removed old GridHelper
+            }
+        }
+
+        class XRControllerManager {
+            constructor(renderer, dolly) {
+                const factory = new XRControllerModelFactory();
+                renderer.xr.addEventListener('sessionstart', () => {
+                    const c1 = renderer.xr.getController(0), c2 = renderer.xr.getController(1);
+                    dolly.add(c1, c2);
+                    const g1 = renderer.xr.getControllerGrip(0), g2 = renderer.xr.getControllerGrip(1);
+                    g1.add(factory.createControllerModel(g1));
+                    g2.add(factory.createControllerModel(g2));
+                    dolly.add(g1, g2);
+                });
+            }
+        }
+
+        class InputManager {
+            constructor(platform, renderer, controls, movement, slide, sensor) {
+                this.platform = platform; this.renderer = renderer;
+                this.controls = controls; this.movement = movement; this.slide = slide;
+                document.body.addEventListener('click', () => {
+                    if (!this.renderer.xr.isPresenting && !this.platform.isMobile) controls.lock();
+                });
+                controls.addEventListener('lock', () => document.getElementById('hint').textContent = 'Locked • Arrows/WASD');
+                controls.addEventListener('unlock', () => document.getElementById('hint').textContent = 'Click to lock');
+                window.addEventListener('keydown', e => this._onKey(e, true));
+                window.addEventListener('keyup', e => this._onKey(e, false));
+                window.addEventListener('touchstart', e => { this.touchStart = e.touches[0]; });
+                window.addEventListener('touchmove', e => this._onTouch(e), { passive: false });
+                window.addEventListener('touchend', () => {
+                    this.touchStart = null;
+                    /* keep the same object instance so MovementController sees the change */
+                    this.slide.x = 0;
+                    this.slide.y = 0;
+                    this.slide.mag = 0;
+                });
+            }
+            _onKey(e, down) {
+                switch (e.code) {
+                    case 'ArrowUp': case 'KeyW': this.movement.forward = down; break;
+                    case 'ArrowDown': case 'KeyS': this.movement.backward = down; break;
+                    case 'ArrowLeft': case 'KeyA': this.movement.left = down; break;
+                    case 'ArrowRight': case 'KeyD': this.movement.right = down; break;
+                    case 'ShiftLeft': case 'ShiftRight': this.movement.shift = down; break;
+                    case 'ControlLeft': case 'ControlRight': this.movement.crouch = down; break;
+                    case 'Space': if (down && this.movement.jumpState === 'idle') {
+                        this.movement.jumpState = 'up'; this.movement.jumpTarget = this.movement.JUMP_Y;
+                    } break;
+                }
+            }
+            _onTouch(e) {
+                if (!this.touchStart) return;
+                const t = e.touches[0];
+                let dx = t.clientX - this.touchStart.clientX, dy = t.clientY - this.touchStart.clientY;
+                const mx = 200;
+                dx = Math.max(-mx, Math.min(mx, dx));
+                dy = Math.max(-mx, Math.min(mx, dy));
+                this.slide.x = dx / mx; this.slide.y = dy / mx;
+                this.slide.mag = Math.min(1, Math.hypot(this.slide.x, this.slide.y));
+                e.preventDefault();
+            }
+        }
+
+        class MovementController {
+            constructor(sceneMgr, inputMgr, consts, platform) {
+                this.dolly = sceneMgr.dolly;
+                this.camera = sceneMgr.camera;
+                this.renderer = sceneMgr.renderer;
+                this.input = inputMgr.movement ? inputMgr.movement : inputMgr;
+                this.slide = inputMgr.slide;
+                this.consts = consts;
+                this.platform = platform;
+
+                /* ← mobile orientation payload comes from SensorManager */
+                this.orientation = { alpha: 0, beta: 0, gamma: 0, ready: false };
+                document.addEventListener('orientation-updated', e => {
+                    Object.assign(this.orientation, e.detail, { ready: true });
+                });
+            }
+            update(dt) {
+                /* ------------------------- aliases / consts ------------------------- */
+                const { FWD, RIGHT } = this.consts.vectors;
+                const {
+                    BASE_SPEED, YAW_SPEED, DEADZONE,
+                    RUN_EASE, MIN_RUN, MAX_RUN,
+                    CROUCH_EASE          // JUMP_EASE no longer needed for physics jump
+                } = this.consts;
+                const inp = this.input;          // shorthand
+                const GRAV = 20;                  // “eye-units” · s⁻²  (tweak to taste)
+
+                /* -------- one-time per-run initialisation of vertical state --------- */
+                if (inp.eyeY === undefined) {
+                    inp.baseEye = inp.STAND_Y;
+                    inp.crouchEye = inp.CROUCH_Y;
+                    inp.jumpPeak = inp.baseEye * 1.5;
+                    inp.eyeY = inp.baseEye;
+                    inp.vertVel = 0;             // current vertical velocity
+                    inp.groundY = 0;             // updated by _snap()
+                }
+
+                /* ---------------- trigger: convert “up” into a real jump ------------ */
+                if (inp.jumpState === 'up') {              // set by space-bar / R-stick
+                    const h = inp.jumpPeak - inp.baseEye;
+                    inp.vertVel = Math.sqrt(2 * GRAV * h);   // v₀ for that height
+                    inp.jumpState = 'jumping';
+                }
+
+                /* --------------------------- vertical motion ------------------------ */
+                if (inp.jumpState === 'jumping') {         // simple ballistic arc
+                    inp.vertVel -= GRAV * dt;
+                    inp.eyeY += inp.vertVel * dt;
+
+                    /* landed?  clamp & finish */
+                    if (inp.eyeY <= inp.baseEye) {
+                        inp.eyeY = inp.baseEye;
+                        inp.vertVel = 0;
+                        inp.jumpState = 'idle';
+                    }
+                } else {                                   // stand / crouch easing
+                    const tgt = inp.crouch ? inp.crouchEye : inp.baseEye;
+                    inp.eyeY += (tgt - inp.eyeY) * Math.min(1, CROUCH_EASE * dt);
+                }
+
+                /* camera height = terrain + eye-offset */
+                this.dolly.position.y = inp.groundY + inp.eyeY;
+
+                /* --------------------------- VR locomotion -------------------------- */
+                if (this.renderer.xr.isPresenting) {
+                    this.camera.getWorldDirection(FWD); FWD.y = 0; FWD.normalize();
+                    RIGHT.crossVectors(FWD, new THREE.Vector3(0, 1, 0)).normalize();
+
+                    this.renderer.xr.getSession().inputSources.forEach(src => {
+                        const gp = src.gamepad; if (!gp) return;
+                        const sx = gp.axes[2] || 0, sy = gp.axes[3] || 0;
+
+                        /* left-stick – move / run */
+                        if (src.handedness === 'left') {
+                            const tgtMul = gp.buttons[1]?.value > 0.5 ? MAX_RUN : MIN_RUN;
+                            inp.runMul += (tgtMul - inp.runMul) * RUN_EASE * dt;
+
+                            if (Math.hypot(sx, sy) > DEADZONE) {
+                                this.dolly.position.addScaledVector(
+                                    RIGHT, sx * BASE_SPEED * dt * inp.runMul
+                                );
+                                this.dolly.position.addScaledVector(
+                                    FWD, -sy * BASE_SPEED * dt * inp.runMul
+                                );
+                            }
+                        }
+
+                        /* right-stick – yaw / jump / crouch */
+                        if (src.handedness === 'right') {
+                            if (Math.abs(sx) > DEADZONE)
+                                this.dolly.rotation.y -= sx * YAW_SPEED * dt;
+
+                            if (sy < -DEADZONE && inp.jumpState === 'idle')
+                                inp.jumpState = 'up';          // start jump next frame
+
+                            inp.crouch = sy > DEADZONE;
+                        }
+                    });
+                }
+                /* --------------------- desktop / mobile locomotion ------------------ */
+                else {
+                    /* phone-orientation “look” --------------------------------------- */
+                    if (this.platform.isMobile && this.orientation.ready) {
+                        const { alpha: a, beta: b, gamma: g } = this.orientation;
+                        const euler = new THREE.Euler(
+                            THREE.MathUtils.degToRad(b),
+                            THREE.MathUtils.degToRad(a),
+                            THREE.MathUtils.degToRad(-g),
+                            'YXZ'
+                        );
+                        const quat = new THREE.Quaternion().setFromEuler(euler)
+                            .multiply(
+                                new THREE.Quaternion().setFromAxisAngle(
+                                    new THREE.Vector3(1, 0, 0), -Math.PI / 2
+                                )
+                            );
+                        this.dolly.quaternion.copy(quat);
+                    }
+
+                    /* keyboard / touch movement -------------------------------------- */
+                    if (inp.controls.isLocked || this.platform.isMobile) {
+                        this.camera.getWorldDirection(FWD); FWD.y = 0; FWD.normalize();
+                        RIGHT.crossVectors(FWD, new THREE.Vector3(0, 1, 0)).normalize();
+
+                        let mx = 0, mz = 0;
+                        if (inp.forward) mz++;
+                        if (inp.backward) mz--;
+                        if (inp.left) mx--;
+                        if (inp.right) mx++;
+
+                        mx += this.slide.x * this.slide.mag;
+                        mz -= this.slide.y * this.slide.mag;
+
+                        if (mx || mz) {
+                            const dir = new THREE.Vector3()
+                                .addScaledVector(RIGHT, mx)
+                                .addScaledVector(FWD, mz)
+                                .normalize();
+                            const speed = BASE_SPEED * (inp.shift ? MAX_RUN : MIN_RUN);
+                            this.dolly.position.addScaledVector(dir, speed * dt);
+                        }
+                    }
+                }
+
+                /* 2nd clamp in case _snap() ran after our logic ---------------------- */
+                this.dolly.position.y = inp.groundY + inp.eyeY;
+            }
+
+
+
+        }
+
+
+        class App {
+            constructor() {
+                if (location.protocol !== 'https:') {
+                    location.href = 'https:' + window.location.href.substring(location.protocol.length);
+                }
+
+                // ─── core setup ───────────────────────────────────
+                this.platform = new Platform();
+                this.hintEl = document.getElementById('hint');
+                this.requestBtn = document.getElementById('request');
+                this.sensorMgr = new SensorManager(this.requestBtn, this.hintEl, this.platform);
+                new GeoRequester(document.getElementById('geo'));
+
+                this.sceneMgr = new SceneManager(this.platform);
+                new XRControllerManager(this.sceneMgr.renderer, this.sceneMgr.dolly);
+
+                this.hexGridMgr = new TileManager(this.sceneMgr.scene, 5, 50);
+                // ─── peer sync ─────────────────────────────────────────────────────────
+                this.peerMgr = new PeerManager(
+                    SIGNALING_SERVER,
+                    this.sceneMgr.scene,
+                    this.sceneMgr.dolly,
+                    this.sceneMgr.camera,
+                    this.hexGridMgr
+                );
+                // 1) first define your movement state (including baseEye)
+                this.movement = {
+                    forward: false, backward: false, left: false, right: false,
+                    shift: false, crouch: false,
+                    groundY: 0,
+                    baseEye: 1.6, eyeY: 1.6,
+                    crouchEye: 0.8, jumpPeak: 2.4, jumpState: 'idle',
+                    runMul: 1,
+                    slide: { x: 0, y: 0, mag: 0 },
+                    controls: null    // will fill in next
+                };
+
+                // 2) now build pointer‐lock around the camera
+                this.controls = new PointerLockControls(this.sceneMgr.camera, document.body);
+
+                // 3) attach the control’s own pivot back onto the dolly,
+                //    and lift it up by baseEye so rotation centers at head height
+                this.sceneMgr.dolly.add(this.controls.getObject());
+
+                // 4) finish wiring movement.controls and InputManager
+                this.movement.controls = this.controls;
+                this.inputMgr = new InputManager(
+                    this.platform,
+                    this.sceneMgr.renderer,
+                    this.controls,
+                    this.movement,
+                    this.movement.slide,
+                    this.sensorMgr
+                );
+
+                // 5) snap into place one first time
+                this._snap();
+
+
+                this.consts = {
+                    BASE_SPEED: 2, YAW_SPEED: 1.5, DEADZONE: 0.2,
+                    RUN_EASE: 3, MIN_RUN: 1, MAX_RUN: 3,
+                    JUMP_EASE: 4, CROUCH_EASE: 6,
+                    vectors: { FWD: new THREE.Vector3(), RIGHT: new THREE.Vector3() }
+                };
+                this.moveCtrl = new MovementController(
+                    this.sceneMgr, this.movement, this.consts, this.platform
+                );
+
+                // ─── birds-eye spherical & speed setup ─────────────────
+                this.birdsCamera = new THREE.PerspectiveCamera(
+                    75, window.innerWidth / window.innerHeight, 0.05, 1000
+                );
+                this._birdsOffsetEnd = new THREE.Vector3(0, 200, -200);
+                this._birdsSphericalStart = new THREE.Spherical();
+                this._birdsSphericalEnd = new THREE.Spherical();
+                this._birdsSphericalCur = new THREE.Spherical();
+                this._birdsSphericalEnd.setFromVector3(this._birdsOffsetEnd);
+                this._basePhi = this._birdsSphericalEnd.phi;
+                const maxDeg = 10;
+                this._maxPitchDelta = THREE.MathUtils.degToRad(maxDeg);
+                this._minPhi = this._basePhi - this._maxPitchDelta;
+                this._maxPhi = this._basePhi + this._maxPitchDelta;
+
+                this._birdsLerp = 0;
+                this.isBirdsEye = false;
+                this._resetPitch = false;
+                this._pitchEase = 5;
+                this._pitchResetTimeout = null;
+
+                // birds-eye speed multipliers
+                this.shiftHoldTime = 0;
+                this.birdWalkMultiplier = 20;
+                this.birdRunRampRate = 0.5;
+                this.maxBirdRunMultiplier = 4;
+
+                // track whether pointer is locked for orbit
+                this.birdsPointerLocked = false;
+
+                // bind & listen
+                this._onWheel = this._onWheel.bind(this);
+                this._onBirdsMouse = this._onBirdsMouse.bind(this);
+                this._onPointerLockChange = this._onPointerLockChange.bind(this);
+                this._onClickLock = this._onClickLock.bind(this);
+
+                window.addEventListener('wheel', this._onWheel, { passive: true });
+                window.addEventListener('mousemove', this._onBirdsMouse);
+                window.addEventListener('resize', () => this._onResize());
+                document.addEventListener('pointerlockchange', this._onPointerLockChange);
+                // allow re-locking when clicking in birds-eye
+                window.addEventListener('click', this._onClickLock);
+
+                this.clock = new THREE.Clock();
+                this.sceneMgr.renderer.setAnimationLoop(() => this._update());
+            }
+
+            _snap() {
+                const pos = this.sceneMgr.dolly.position;
+                const h = this.hexGridMgr.getHeightAt(pos.x, pos.z);
+                this.sceneMgr.dolly.position.y = h + this.movement.baseEye;
+            }
+
+            _onResize() {
+                const w = window.innerWidth, h = window.innerHeight;
+                this.sceneMgr.camera.aspect = w / h;
+                this.birdsCamera.aspect = w / h;
+                this.sceneMgr.camera.updateProjectionMatrix();
+                this.birdsCamera.updateProjectionMatrix();
+                this.sceneMgr.renderer.setSize(w, h);
+            }
+
+            _onWheel(evt) {
+                if (evt.deltaY > 0) {
+                    if (!this.isBirdsEye) this._enterBirdsEye();
+                } else {
+                    if (this.isBirdsEye) this._exitBirdsEye();
+                }
+            }
+
+            _enterBirdsEye() {
+                // request pointer lock immediately
+                this.sceneMgr.renderer.domElement.requestPointerLock();
+
+                // capture start spherical
+                const dollyPos = this.sceneMgr.dolly.position;
+                this.sceneMgr.camera.getWorldPosition(this._tempV || (this._tempV = new THREE.Vector3()));
+                this._tempV.sub(dollyPos);
+                this._birdsSphericalStart.setFromVector3(this._tempV);
+
+                // set target spherical to end-offset
+                this._birdsSphericalEnd.setFromVector3(this._birdsOffsetEnd);
+
+                this._birdsLerp = 0;
+                this.isBirdsEye = true;
+                this.shiftHoldTime = 0;
+            }
+
+            _exitBirdsEye() {
+                this.isBirdsEye = false;
+                clearTimeout(this._pitchResetTimeout);
+                this._resetPitch = false;
+                this.shiftHoldTime = 0;
+                // if still locked, exit pointer lock
+                if (document.pointerLockElement === this.sceneMgr.renderer.domElement) {
+                    document.exitPointerLock();
+                }
+            }
+
+            _onPointerLockChange() {
+                // update lock state only when in birds-eye
+                this.birdsPointerLocked = (
+                    this.isBirdsEye &&
+                    document.pointerLockElement === this.sceneMgr.renderer.domElement
+                );
+            }
+
+            _onClickLock() {
+                // on click, if zoomed-out but unlocked, re-request lock
+                if (this.isBirdsEye && !this.birdsPointerLocked) {
+                    this.sceneMgr.renderer.domElement.requestPointerLock();
+                }
+            }
+
+            _onBirdsMouse(evt) {
+                // only orbit if fully zoomed-out AND pointer locked
+                if (!this.isBirdsEye || this._birdsLerp < 1 || !this.birdsPointerLocked) return;
+
+                // yaw
+                this._birdsSphericalEnd.theta += -evt.movementX * 0.002;
+                // pitch
+                this._birdsSphericalEnd.phi += -evt.movementY * 0.002;
+                this._birdsSphericalEnd.phi = THREE.MathUtils.clamp(
+                    this._birdsSphericalEnd.phi,
+                    this._minPhi,
+                    this._maxPhi
+                );
+                // schedule pitch reset
+                clearTimeout(this._pitchResetTimeout);
+                this._resetPitch = false;
+                this._pitchResetTimeout = setTimeout(() => {
+                    this._resetPitch = true;
+                }, 200);
+            }
+
+            _update() {
+                const dt = this.clock.getDelta();
+                const pos = this.sceneMgr.dolly.position;
+
+                // ground height
+                this.movement.groundY = this.hexGridMgr.getHeightAt(pos.x, pos.z);
+
+                // first-person only when not zoomed out
+                if (!this.isBirdsEye) {
+                    this.moveCtrl.update(dt);
+                }
+                this.hexGridMgr.update(pos);
+                const hashEl = document.getElementById('curHash');
+                if (hashEl) {
+                    hashEl.textContent = this.hexGridMgr.getCurrentHash(pos) || '--';
+                }
+                // broadcast our own pose & update all remote peers
+                this.peerMgr.broadcastPose();
+                this.peerMgr.updatePeers();
+
+                if (this.isBirdsEye) {
+                    // slide-in
+                    if (this._birdsLerp < 1) {
+                        this._birdsLerp = Math.min(1, this._birdsLerp + dt / 0.5);
+                    }
+
+                    // auto-reset pitch
+                    if (this._birdsLerp >= 1 && this._resetPitch) {
+                        const diff = this._basePhi - this._birdsSphericalEnd.phi;
+                        this._birdsSphericalEnd.phi += diff * Math.min(1, this._pitchEase * dt);
+                        if (Math.abs(diff) < 1e-3) {
+                            this._birdsSphericalEnd.phi = this._basePhi;
+                            this._resetPitch = false;
+                        }
+                    }
+
+                    // interpolate spherical
+                    this._birdsSphericalCur.radius = THREE.MathUtils.lerp(
+                        this._birdsSphericalStart.radius,
+                        this._birdsSphericalEnd.radius,
+                        this._birdsLerp
+                    );
+                    this._birdsSphericalCur.theta = THREE.MathUtils.lerp(
+                        this._birdsSphericalStart.theta,
+                        this._birdsSphericalEnd.theta,
+                        this._birdsLerp
+                    );
+                    this._birdsSphericalCur.phi = THREE.MathUtils.lerp(
+                        this._birdsSphericalStart.phi,
+                        this._birdsSphericalEnd.phi,
+                        this._birdsLerp
+                    );
+
+                    // offset vector
+                    const offset = this._offsetV || (this._offsetV = new THREE.Vector3());
+                    offset.setFromSpherical(this._birdsSphericalCur);
+
+                    // birds-eye movement speed
+                    if (this.movement.shift) {
+                        this.shiftHoldTime += dt;
+                    } else {
+                        this.shiftHoldTime = 0;
+                    }
+                    const walkMult = this.birdWalkMultiplier;
+                    const runMult = Math.min(
+                        this.maxBirdRunMultiplier,
+                        1 + this.shiftHoldTime * this.birdRunRampRate
+                    );
+                    const mult = this.movement.shift ? runMult : walkMult;
+                    const speed = this.consts.BASE_SPEED * dt * mult;
+
+                    // move relative to view
+                    const fwd = new THREE.Vector3();
+                    this.birdsCamera.getWorldDirection(fwd);
+                    fwd.y = 0; fwd.normalize();
+                    const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0));
+
+                    if (this.movement.forward) pos.addScaledVector(fwd, speed);
+                    if (this.movement.backward) pos.addScaledVector(fwd, -speed);
+                    if (this.movement.left) pos.addScaledVector(right, -speed);
+                    if (this.movement.right) pos.addScaledVector(right, speed);
+
+                    // attach & look
+                    this.birdsCamera.position.copy(pos).add(offset);
+                    this.birdsCamera.lookAt(pos);
+
+                    this.sceneMgr.renderer.render(
+                        this.sceneMgr.scene,
+                        this.birdsCamera
+                    );
+                } else {
+                    this.sceneMgr.renderer.render(
+                        this.sceneMgr.scene,
+                        this.sceneMgr.camera
+                    );
+                }
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', () => new App());
+
+
+    </script>
+    <!-- Note: include LZString library for compression/decompression -->
+    <script src="https://cdn.jsdelivr.net/npm/lz-string@1.4.4/libs/lz-string.min.js"></script>
+</body>
+
+</html>
